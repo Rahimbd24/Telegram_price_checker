@@ -4,7 +4,7 @@ import os
 import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from aiohttp import web  # <-- বিল্ট-ইন সার্ভারের জন্য এটি প্রয়োজন
+from aiohttp import web  # This is correct
 
 # --- Config ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -99,65 +99,31 @@ async def health_check(request: web.Request):
     """UptimeRobot কে জানানোর জন্য যে বটটি বেঁচে আছে।"""
     return web.Response(text="OK, Bot is alive!", status=200)
 
-# --- বট চালু করার মূল ফাংশন (সঠিক পদ্ধতি) ---
+# --- বট চালু করার মূল ফাংশন (চূড়ান্ত সঠিক পদ্ধতি) ---
 def main():
     """বটটি Webhook মোডে চালু করবে"""
-    
-    # Quick env validation
-    if not BOT_TOKEN:
-        logger.error("Environment variable BOT_TOKEN is not set. Aborting start.")
-        return
-    if not RENDER_URL:
-        logger.error("Environment variable RENDER_EXTERNAL_URL is not set. Aborting start.")
-        return
 
     # --- 1. Telegram Application build করা ---
+    # এটি নিজে থেকেই একটি aiohttp.web.Application তৈরি করে
     application = Application.builder().token(BOT_TOKEN).build()
 
     # --- 2. বট হ্যান্ডলার যোগ করা ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # --- 3. Build a separate aiohttp web app and add the health-check route ---
-    # Different python-telegram-bot versions expose different webhook
-    # integrations. We'll try the most capable option (passing our
-    # aiohttp `web_app` to `run_webhook`) and gracefully fall back to the
-    # plain `run_webhook(...)` call if that parameter isn't supported.
-    web_app = web.Application()
-    web_app.add_routes([web.get('/', health_check)])
+    # --- 3. Health check রুটটি বিল্ট-ইন web_app-এ যোগ করা (সঠিক পদ্ধতি) ---
+    # .build() করার পর .web_app অবজেক্টটি পাওয়া যায়
+    application.web_app.add_routes([web.get('/', health_check)])
 
-    # --- 4. Start the webhook server and attach our aiohttp app ---
+    # --- 4. Webhook চালু করা ---
+    # এটিই বট এবং হেলথ চেক সার্ভার—দুটিই একসাথে চালু করবে
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
-    try:
-        # Try the newer/expected signature that accepts `web_app`.
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path="", # keep the webhook path as configured (can be changed to '/<token>' if needed)
-            webhook_url=f"{RENDER_URL}",
-            web_app=web_app
-        )
-    except TypeError:
-        # Older or different PTB versions may not accept `web_app`.
-        # Fall back to calling run_webhook without it. This avoids the
-        # crash you saw in Render logs. If the library exposes
-        # `application.web_app`, attach our route there instead.
-        logger.warning("run_webhook() does not accept `web_app`. Falling back to run_webhook(...) without passing `web_app`.\n"
-                       "If you need the health-check endpoint on the same port, consider updating python-telegram-bot or configuring a webhook path and external health check.")
-        # If application has an internal web_app, try to attach the route.
-        try:
-            if hasattr(application, 'web_app') and application.web_app is not None:
-                application.web_app.add_routes([web.get('/', health_check)])
-        except Exception:
-            # best-effort: ignore failures here, we'll still start the webhook
-            pass
-
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path="", # keep the webhook path as configured
-            webhook_url=f"{RENDER_URL}"
-        )
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="", # Webhook এখন মূল URL-এ সেট হবে
+        webhook_url=f"{RENDER_URL}"
+    )
     logger.info(f"Webhook bot started successfully!")
 
 if __name__ == "__main__":
