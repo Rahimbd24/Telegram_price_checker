@@ -103,20 +103,24 @@ async def health_check(request: web.Request):
 def main():
     """বটটি Webhook মোডে চালু করবে"""
 
-    # --- 1. Telegram Application build করা ---
-    # এটি নিজে থেকেই একটি aiohttp.web.Application তৈরি করে
-    application = Application.builder().token(BOT_TOKEN).build()
+    # --- 1. aiohttp.web.Application তৈরি করা (সঠিক স্থান) ---
+    # health_check রুটটি বিল্ডারের *আগে* এখানে যোগ করতে হবে
+    web_app = web.Application()
+    web_app.add_routes([web.get('/', health_check)])
 
-    # --- 2. বট হ্যান্ডলার যোগ করা ---
+    # --- 2. Telegram Application build করা ---
+    # এবং বিল্ডারকে আপনার কাস্টম web_app টি পাস করতে হবে
+    application = Application.builder().token(BOT_TOKEN).web_app(web_app).build()
+
+    # --- 3. বট হ্যান্ডলার যোগ করা ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # --- 3. Health check রুটটি বিল্ট-ইন web_app-এ যোগ করা (সঠিক পদ্ধতি) ---
-    # .build() করার পর .web_app অবজেক্টটি পাওয়া যায়
-    application.web_app.add_routes([web.get('/', health_check)])
+    # --- 4. Health check রুট (এই লাইনের আর প্রয়োজন নেই) ---
+    # application.web_app.add_routes([web.get('/', health_check)]) # <-- এই লাইনটি সরানো হয়েছে
 
-    # --- 4. Webhook চালু করা ---
-    # এটিই বট এবং হেলথ চেক সার্ভার—দুটিই একসাথে চালু করবে
+    # --- 5. Webhook চালু করা ---
+    # এটি এখন আপনার কাস্টম web_app টি ব্যবহার করবে
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
     application.run_webhook(
         listen="0.0.0.0",
