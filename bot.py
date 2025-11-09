@@ -6,9 +6,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- Config (Render থেকে স্বয়ংক্রিয়ভাবে লোড হবে) ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-# Render এই দুটি ভেরিয়েবল নিজে থেকেই সেট করে দেয়
 PORT = int(os.environ.get('PORT', 8443))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+
+# --- !!! এই দুটি লাইন আপনার কোডে মিসিং ছিল !!! ---
+COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
+COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search"
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -91,7 +94,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
     # --- Webhook চালু করা ---
-    # এটি Render-এর URL এবং Port ব্যবহার করে নিজে থেকেই Webhook সেট করবে
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
     application.run_webhook(
         listen="0.0.0.0",
