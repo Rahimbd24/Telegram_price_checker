@@ -103,6 +103,14 @@ async def health_check(request: web.Request):
 def main():
     """বটটি Webhook মোডে চালু করবে"""
     
+    # Quick env validation
+    if not BOT_TOKEN:
+        logger.error("Environment variable BOT_TOKEN is not set. Aborting start.")
+        return
+    if not RENDER_URL:
+        logger.error("Environment variable RENDER_EXTERNAL_URL is not set. Aborting start.")
+        return
+
     # --- 1. Telegram Application build করা ---
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -110,16 +118,23 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # --- 3. Health check রুটটি বিল্ট-ইন web_app-এ যোগ করা (সঠিক পদ্ধতি) ---
-    application.web_app.add_routes([web.get('/', health_check)])
+    # --- 3. Build a separate aiohttp web app and add the health-check route ---
+    # The telegram Application doesn't always expose a `web_app` attribute
+    # depending on the library version, so create our own and pass it to
+    # `run_webhook` below.
+    web_app = web.Application()
+    web_app.add_routes([web.get('/', health_check)])
 
-    # --- 4. Webhook চালু করা ---
+    # --- 4. Start the webhook server and attach our aiohttp app ---
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
+    # Use `web_app=` so the aiohttp server used by python-telegram-bot
+    # serves our health-check route as well.
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path="", # Webhook এখন মূল URL-এ সেট হবে
-        webhook_url=f"{RENDER_URL}"
+        url_path="", # keep the webhook path as configured (can be changed to '/<token>' if needed)
+        webhook_url=f"{RENDER_URL}",
+        web_app=web_app
     )
     logger.info(f"Webhook bot started successfully!")
 
