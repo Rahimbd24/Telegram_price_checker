@@ -2,19 +2,19 @@ import requests
 import logging
 import os
 import time
-from flask import Flask, request # <-- We are using Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web  # <-- বিল্ট-ইন সার্ভারের জন্য এটি প্রয়োজন
 
 # --- Config ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-PORT = int(os.environ.get('PORT', 8080)) # Gunicorn uses this port
+PORT = int(os.environ.get('PORT', 8443))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 # --- API Endpoints ---
 COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search"
-CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/price" # Backup API
+CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/price" # ব্যাকআপ API
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -22,13 +22,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# --- Telegram Bot Application ---
-application = Application.builder().token(BOT_TOKEN).build()
-
-# --- Flask App ---
-app = Flask(__name__) # This is our web server
-
 
 # --- /start Command Handler ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,7 +32,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "symbol, and I will get the real-time USD price for you."
     )
 
-# --- Main Price Checker Function (Failover logic) ---
+# --- Main Price Checker Function (Failover লজিক সহ) ---
 async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.lower().strip()
 
@@ -60,11 +53,11 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Error fetching data from the Search API.")
         return
 
-    # Step 2: Price check (with Failover)
+    # Step 2: প্রাইস খোঁজা (Failover লজিক)
     price_usd = None
     message_note = ""
     try:
-        # First try: CoinGecko
+        # প্রথম চেষ্টা: CoinGecko
         price_params = {'ids': coin_id, 'vs_currencies': 'usd'}
         price_response = requests.get(COINGECKO_PRICE_URL, params=price_params)
         price_response.raise_for_status()
@@ -74,7 +67,7 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             raise Exception("Price data not found in CoinGecko response")
     except requests.exceptions.RequestException as e:
-        # Second try: CryptoCompare (Backup)
+        # দ্বিতীয় চেষ্টা: CryptoCompare (ব্যাকআপ)
         logger.warning(f"CoinGecko FAILED ({e}). Trying Backup API...")
         try:
             backup_params = {'fsym': coin_symbol.upper(), 'tsyms': 'USD'}
@@ -90,7 +83,7 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Error fetching data. Both primary and backup APIs are down.")
             return
 
-    # Step 3: Send message
+    # Step 3: মেসেজ পাঠানো
     if 0 < price_usd < 0.01: formatted_price = f"${price_usd:,.8f}"
     else: formatted_price = f"${price_usd:,.2f}"
     
@@ -101,33 +94,34 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += message_note
     await update.message.reply_text(message, parse_mode='Markdown')
 
+# --- UptimeRobot-এর জন্য "Health Check" রুট ---
+async def health_check(request: web.Request):
+    """UptimeRobot কে জানানোর জন্য যে বটটি বেঁচে আছে।"""
+    return web.Response(text="OK, Bot is alive!", status=200)
 
-# --- UptimeRobot "Health Check" Route ---
-@app.route('/')
-def health_check():
-    """Tells UptimeRobot the bot is alive."""
-    return "OK, Bot is alive!", 200
+# --- বট চালু করার মূল ফাংশন (সঠিক পদ্ধতি) ---
+def main():
+    """বটটি Webhook মোডে চালু করবে"""
+    
+    # --- 1. Telegram Application build করা ---
+    application = Application.builder().token(BOT_TOKEN).build()
 
-# --- Telegram Webhook Route ---
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Handles messages from Telegram."""
-    update_json = request.get_json(force=True)
-    update = Update.de_json(update_json, application.bot)
-    await application.update_queue.put(update)
-    return 'ok'
+    # --- 2. বট হ্যান্ডলার যোগ করা ---
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-# --- Set Webhook Route (Run this once) ---
-@app.route('/set_webhook')
-def set_webhook():
-    """Sets the webhook for Telegram."""
-    webhook_url = f"{RENDER_URL}/webhook"
-    success = application.bot.set_webhook(webhook_url)
-    if success:
-        return f"Webhook set to {webhook_url}!"
-    else:
-        return "Webhook setup failed."
+    # --- 3. Health check রুটটি বিল্ট-ইন web_app-এ যোগ করা (সঠিক পদ্ধতি) ---
+    application.web_app.add_routes([web.get('/', health_check)])
 
-# --- Add handlers to the bot application ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
+    # --- 4. Webhook চালু করা ---
+    logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="", # Webhook এখন মূল URL-এ সেট হবে
+        webhook_url=f"{RENDER_URL}"
+    )
+    logger.info(f"Webhook bot started successfully!")
+
+if __name__ == "__main__":
+    main()
