@@ -1,10 +1,10 @@
-import requests
+import aiohttp  # Correct library for async requests
 import logging
 import os
 import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from aiohttp import web  # This is correct
+from aiohttp import web
 
 # --- Config ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -32,56 +32,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "symbol, and I will get the real-time USD price for you."
     )
 
-# --- Main Price Checker Function (Failover লজিক সহ) ---
+# --- Main Price Checker Function (Non-Blocking) ---
 async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.lower().strip()
+    
+    # Use aiohttp.ClientSession for async requests
+    async with aiohttp.ClientSession() as session:
 
-    # Step 1: Search API
-    search_params = {'query': user_input}
-    coin_id, coin_name, coin_symbol = None, "", ""
-    try:
-        search_response = requests.get(COINGECKO_SEARCH_URL, params=search_params)
-        search_response.raise_for_status()
-        search_data = search_response.json()
-        if not search_data.get('coins'):
-            await update.message.reply_text(f"❌ Sorry, I couldn't find any coin matching '{user_input}'.")
-            return
-        first_coin = search_data['coins'][0]
-        coin_id, coin_name, coin_symbol = first_coin['id'], first_coin['name'], first_coin['symbol']
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Search API Error: {e}")
-        await update.message.reply_text("Error fetching data from the Search API.")
-        return
-
-    # Step 2: প্রাইস খোঁজা (Failover লজিক)
-    price_usd = None
-    message_note = ""
-    try:
-        # প্রথম চেষ্টা: CoinGecko
-        price_params = {'ids': coin_id, 'vs_currencies': 'usd'}
-        price_response = requests.get(COINGECKO_PRICE_URL, params=price_params)
-        price_response.raise_for_status()
-        price_data = price_response.json()
-        if coin_id in price_data and 'usd' in price_data[coin_id]:
-            price_usd = price_data[coin_id].get('usd', 0)
-        else:
-            raise Exception("Price data not found in CoinGecko response")
-    except requests.exceptions.RequestException as e:
-        # দ্বিতীয় চেষ্টা: CryptoCompare (ব্যাকআপ)
-        logger.warning(f"CoinGecko FAILED ({e}). Trying Backup API...")
+        # Step 1: Search API
+        search_params = {'query': user_input}
+        coin_id, coin_name, coin_symbol = None, "", ""
         try:
-            backup_params = {'fsym': coin_symbol.upper(), 'tsyms': 'USD'}
-            backup_response = requests.get(CRYPTOCOMPARE_URL, params=backup_params)
-            backup_response.raise_for_status()
-            backup_data = backup_response.json()
-            if 'USD' not in backup_data:
-                raise Exception(f"Backup API didn't recognize symbol: {coin_symbol.upper()}")
-            price_usd = backup_data['USD']
-            message_note = "\n_(Price via backup provider)_"
-        except Exception as backup_e:
-            logger.error(f"BACKUP API FAILED: {backup_e}")
-            await update.message.reply_text("Error fetching data. Both primary and backup APIs are down.")
+            async with session.get(COINGECKO_SEARCH_URL, params=search_params) as search_response:
+                search_response.raise_for_status() # Check for HTTP errors
+                search_data = await search_response.json()
+                
+                if not search_data.get('coins'):
+                    await update.message.reply_text(f"❌ Sorry, I couldn't find any coin matching '{user_input}'.")
+                    return
+                
+                first_coin = search_data['coins'][0]
+                coin_id, coin_name, coin_symbol = first_coin['id'], first_coin['name'], first_coin['symbol']
+        
+        except aiohttp.ClientError as e:
+            logger.error(f"Search API Error: {e}")
+            await update.message.reply_text("Error fetching data from the Search API.")
             return
+
+        # Step 2: প্রাইস খোঁজা (Failover লজিক)
+        price_usd = None
+        message_note = ""
+        try:
+            # প্রথম চেষ্টা: CoinGecko
+            price_params = {'ids': coin_id, 'vs_currencies': 'usd'}
+            async with session.get(COINGECKO_PRICE_URL, params=price_params) as price_response:
+                price_response.raise_for_status()
+                price_data = await price_response.json()
+                
+                if coin_id in price_data and 'usd' in price_data[coin_id]:
+                    price_usd = price_data[coin_id].get('usd', 0)
+                else:
+                    raise Exception("Price data not found in CoinGecko response")
+
+        except aiohttp.ClientError as e:
+            # দ্বিতীয় চেষ্টা: CryptoCompare (ব্যাকআপ)
+            logger.warning(f"CoinGecko FAILED ({e}). Trying Backup API...")
+            try:
+                backup_params = {'fsym': coin_symbol.upper(), 'tsyms': 'USD'}
+                async with session.get(CRYPTOCOMPARE_URL, params=backup_params) as backup_response:
+                    backup_response.raise_for_status()
+                    backup_data = await backup_response.json()
+                    
+                    if 'USD' not in backup_data:
+                        raise Exception(f"Backup API didn't recognize symbol: {coin_symbol.upper()}")
+                    
+                    price_usd = backup_data['USD']
+                    message_note = "\n_(Price via backup provider)_"
+            
+            except Exception as backup_e: # This can be aiohttp.ClientError or other exceptions
+                logger.error(f"BACKUP API FAILED: {backup_e}")
+                await update.message.reply_text("Error fetching data. Both primary and backup APIs are down.")
+                return
 
     # Step 3: মেসেজ পাঠানো
     if 0 < price_usd < 0.01: formatted_price = f"${price_usd:,.8f}"
@@ -103,24 +114,20 @@ async def health_check(request: web.Request):
 def main():
     """বটটি Webhook মোডে চালু করবে"""
 
-    # --- 1. aiohttp.web.Application তৈরি করা (সঠিক স্থান) ---
-    # health_check রুটটি বিল্ডারের *আগে* এখানে যোগ করতে হবে
-    web_app = web.Application()
-    web_app.add_routes([web.get('/', health_check)])
+    # --- 1. Telegram Application build করা ---
+    # (web_app অবজেক্টটি এখানে তৈরি হয়)
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    # --- 2. Telegram Application build করা ---
-    # এবং বিল্ডারকে আপনার কাস্টম web_app টি পাস করতে হবে
-    application = Application.builder().token(BOT_TOKEN).web_app(web_app).build()
-
-    # --- 3. বট হ্যান্ডলার যোগ করা ---
+    # --- 2. বট হ্যান্ডলার যোগ করা ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # --- 4. Health check রুট (এই লাইনের আর প্রয়োজন নেই) ---
-    # application.web_app.add_routes([web.get('/', health_check)]) # <-- এই লাইনটি সরানো হয়েছে
+    # --- 3. Health check রুটটি বিল্ট-ইন web_app-এ যোগ করা (সঠিক পদ্ধতি) ---
+    # .build() করার পর application.web_app অবজেক্টটি পাওয়া যায়
+    application.web_app.add_routes([web.get('/', health_check)])
 
-    # --- 5. Webhook চালু করা ---
-    # এটি এখন আপনার কাস্টম web_app টি ব্যবহার করবে
+    # --- 4. Webhook চালু করা ---
+    # এটিই বট এবং হেলথ চেক সার্ভার—দুটিই একসাথে চালু করবে
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
     application.run_webhook(
         listen="0.0.0.0",
