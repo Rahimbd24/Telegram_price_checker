@@ -1,159 +1,148 @@
-# corrected bot.py
 import aiohttp
 import logging
 import os
 import sys
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from aiohttp import web
 
-# --- Config ---
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-PORT = int(os.environ.get('PORT', 8443))
-RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+# ==================== CONFIG ====================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+PORT = int(os.environ.get("PORT", 8443))
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-# Validate env vars early
+# Validate environment variables
 if not BOT_TOKEN:
-    logging.error("BOT_TOKEN is not set. Set the BOT_TOKEN environment variable and restart.")
+    print("❌ ERROR: BOT_TOKEN not set in environment variables.")
     sys.exit(1)
 
 if not RENDER_URL:
-    logging.error("RENDER_EXTERNAL_URL is not set. Set RENDER_EXTERNAL_URL (e.g. https://your-app.example.com) and restart.")
+    print("❌ ERROR: RENDER_EXTERNAL_URL not set. Example: https://your-app.onrender.com")
     sys.exit(1)
 
-# Ensure RENDER_URL has no trailing slash for consistent building
-RENDER_URL = RENDER_URL.rstrip('/')
+RENDER_URL = RENDER_URL.rstrip("/")  # remove trailing slash
 
-# --- API Endpoints ---
+# ==================== API ENDPOINTS ====================
 COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search"
 CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/price"  # backup API
 
-# --- Setup Logging ---
+# ==================== LOGGING ====================
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- /start Handler ---
+# ==================== COMMAND HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name if update.effective_user else "there"
+    user = update.effective_user.first_name if update.effective_user else "there"
     await update.message.reply_text(
-        f"👋 Welcome, {user_name}!\n\n"
-        "Send me a crypto name or symbol and I'll return the USD price."
+        f"👋 Hi {user}!\n\nSend me a cryptocurrency name or symbol "
+        "and I’ll return the current USD price."
     )
 
-# --- Price Checker ---
+# ==================== PRICE CHECKER ====================
 async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.lower().strip()
-
+    user_input = update.message.text.strip().lower()
     async with aiohttp.ClientSession() as session:
-        # Search
-        search_params = {'query': user_input}
-        coin_id, coin_name, coin_symbol = None, "", ""
+        # Search CoinGecko
         try:
-            async with session.get(COINGECKO_SEARCH_URL, params=search_params) as search_response:
-                search_response.raise_for_status()
-                search_data = await search_response.json()
-
-                if not search_data.get('coins'):
-                    await update.message.reply_text(f"❌ Sorry, I couldn't find any coin matching '{user_input}'.")
+            async with session.get(COINGECKO_SEARCH_URL, params={"query": user_input}) as res:
+                res.raise_for_status()
+                data = await res.json()
+                if not data.get("coins"):
+                    await update.message.reply_text(f"❌ No coin found for '{user_input}'.")
                     return
-
-                first_coin = search_data['coins'][0]
-                coin_id, coin_name, coin_symbol = first_coin['id'], first_coin['name'], first_coin['symbol']
-
-        except aiohttp.ClientError as e:
-            logger.error(f"Search API Error: {e}")
-            await update.message.reply_text("Error fetching data from the Search API.")
-            return
+                coin = data["coins"][0]
+                coin_id = coin["id"]
+                coin_name = coin["name"]
+                coin_symbol = coin["symbol"]
         except Exception as e:
-            logger.error(f"Unexpected error during search: {e}")
-            await update.message.reply_text("Unexpected error during search.")
+            logger.error(f"Search error: {e}")
+            await update.message.reply_text("⚠️ Error fetching search data.")
             return
 
-        # Price fetch with failover
+        # Get price from CoinGecko
         price_usd = None
-        message_note = ""
+        note = ""
         try:
-            price_params = {'ids': coin_id, 'vs_currencies': 'usd'}
-            async with session.get(COINGECKO_PRICE_URL, params=price_params) as price_response:
-                price_response.raise_for_status()
-                price_data = await price_response.json()
-
-                if coin_id in price_data and 'usd' in price_data[coin_id]:
-                    price_usd = price_data[coin_id].get('usd', 0)
+            async with session.get(
+                COINGECKO_PRICE_URL, params={"ids": coin_id, "vs_currencies": "usd"}
+            ) as res:
+                res.raise_for_status()
+                price_data = await res.json()
+                if coin_id in price_data and "usd" in price_data[coin_id]:
+                    price_usd = price_data[coin_id]["usd"]
                 else:
-                    # raise an exception to trigger backup logic
-                    raise Exception("Price data not found in CoinGecko response")
-
+                    raise ValueError("No USD price found")
         except Exception as e:
-            # catch both aiohttp.ClientError and general exceptions so backup runs
-            logger.warning(f"CoinGecko failed or returned no price ({e}). Trying backup provider...")
+            logger.warning(f"CoinGecko failed ({e}), using backup...")
+            # Backup: CryptoCompare
             try:
-                backup_params = {'fsym': coin_symbol.upper(), 'tsyms': 'USD'}
-                async with session.get(CRYPTOCOMPARE_URL, params=backup_params) as backup_response:
-                    backup_response.raise_for_status()
-                    backup_data = await backup_response.json()
-
-                    if 'USD' not in backup_data:
-                        raise Exception(f"Backup API didn't recognize symbol: {coin_symbol.upper()}")
-
-                    price_usd = backup_data['USD']
-                    message_note = "\n_(Price via backup provider)_"
-
-            except Exception as backup_e:
-                logger.error(f"BACKUP API FAILED: {backup_e}")
-                await update.message.reply_text("Error fetching data. Both primary and backup APIs are down.")
+                async with session.get(
+                    CRYPTOCOMPARE_URL, params={"fsym": coin_symbol.upper(), "tsyms": "USD"}
+                ) as res:
+                    res.raise_for_status()
+                    backup_data = await res.json()
+                    if "USD" in backup_data:
+                        price_usd = backup_data["USD"]
+                        note = " (via backup)"
+            except Exception as e2:
+                logger.error(f"Backup API failed: {e2}")
+                await update.message.reply_text("⚠️ Both APIs failed to fetch price.")
                 return
 
-    # Format price (safeguard if price_usd is None)
-    if price_usd is None:
-        await update.message.reply_text("Could not determine price.")
-        return
+        if price_usd is None:
+            await update.message.reply_text("❌ Could not get price data.")
+            return
 
-    if 0 < price_usd < 0.01:
-        formatted_price = f"${price_usd:,.8f}"
-    else:
-        formatted_price = f"${price_usd:,.2f}"
+        # Format price
+        if 0 < price_usd < 0.01:
+            formatted = f"${price_usd:,.8f}"
+        else:
+            formatted = f"${price_usd:,.2f}"
 
-    # Use HTML parse mode for safer formatting
-    message = (
-        f"<b>{coin_symbol.upper()}</b> ({coin_name})\n\n"
-        f"<b>Current Price (USD):</b> {formatted_price}"
-    )
-    if message_note:
-        message += f"\n<em>{message_note.strip(' _')}</em>"
+        msg = (
+            f"<b>{coin_symbol.upper()}</b> ({coin_name})\n"
+            f"<b>Price (USD):</b> {formatted}{note}"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
 
-    await update.message.reply_text(message, parse_mode='HTML')
+# ==================== HEALTH CHECK ====================
+async def health_check(request):
+    return web.Response(text="✅ Bot is running fine!", status=200)
 
-# --- Health check ---
-async def health_check(request: web.Request):
-    return web.Response(text="OK, Bot is alive!", status=200)
-
+# ==================== MAIN APP ====================
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # Add health-check route to the internal aiohttp app
-    application.web_app.add_routes([web.get('/', health_check)])
+    # Add health-check route (Render friendly)
+    try:
+        if hasattr(app, "web_app"):
+            app.web_app.add_routes([web.get("/", health_check)])
+            logger.info("Health check route added successfully.")
+        else:
+            logger.warning("No web_app attribute — skipping health route.")
+    except Exception as e:
+        logger.warning(f"Could not add health route: {e}")
 
-    # Use BOT_TOKEN as the webhook path (more secure) and build webhook_url accordingly
-    url_path = BOT_TOKEN  # local path the aiohttp app will listen on
+    # Secure webhook URL
+    url_path = BOT_TOKEN  # acts as secret endpoint
     webhook_url = f"{RENDER_URL}/{url_path}"
 
-    logger.info(f"Starting bot... setting webhook to {webhook_url}")
-    # run_webhook will run the built-in web_app and Telegram webhook server
-    application.run_webhook(
+    logger.info(f"Starting webhook on {webhook_url}")
+
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=url_path,
-        webhook_url=webhook_url
+        webhook_url=webhook_url,
     )
-    logger.info("Webhook bot started successfully!")
 
+# ==================== RUN ====================
 if __name__ == "__main__":
     main()
