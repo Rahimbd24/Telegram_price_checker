@@ -2,13 +2,13 @@ import requests
 import logging
 import os
 import time
-from flask import Flask, request # <-- Flask ইম্পোর্ট করা হয়েছে
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web  # <-- নতুন: বিল্ট-ইন ওয়েব সার্ভারে রুট যোগ করার জন্য
 
 # --- Config ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-PORT = int(os.environ.get('PORT', 8080)) # Render Gunicorn-এর জন্য এটি ব্যবহার করে
+PORT = int(os.environ.get('PORT', 8443))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 # --- API Endpoints ---
@@ -23,14 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Telegram Bot Application ---
-application = Application.builder().token(BOT_TOKEN).build()
-
-# --- Flask App ---
-app = Flask(__name__) # Flask সার্ভার ইনিশিয়ালাইজ করা
-
-
-# --- /start Command Handler (আগের মতোই) ---
+# --- /start Command Handler ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     await update.message.reply_text(
@@ -101,35 +94,33 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += message_note
     await update.message.reply_text(message, parse_mode='Markdown')
 
-
 # --- নতুন: UptimeRobot-এর জন্য "Health Check" রুট ---
-@app.route('/')
-def health_check():
+async def health_check(request: web.Request):
     """UptimeRobot কে জানানোর জন্য যে বটটি বেঁচে আছে।"""
-    return "OK, Bot is alive!", 200
+    return web.Response(text="OK, Bot is alive!", status=200)
 
-# --- নতুন: Telegram Webhook রুট ---
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """টেলিগ্রাম থেকে আসা মেসেজ প্রসেস করবে।"""
-    update_json = request.get_json(force=True)
-    update = Update.de_json(update_json, application.bot)
-    await application.update_queue.put(update)
-    return 'ok'
+# --- বট চালু করার মূল ফাংশন ---
+def main():
+    """বটটি Webhook মোডে চালু করবে"""
+    application = Application.builder().token(BOT_TOKEN).build()
 
-# --- নতুন: Webhook সেট করার ফাংশন (প্রয়োজনে ব্যবহার করা যেতে পারে) ---
-@app.route('/set_webhook')
-def set_webhook():
-    """এই URLটি ব্রাউজারে রান করলে Webhook সেট হয়ে যাবে।"""
-    webhook_url = f"{RENDER_URL}/webhook"
-    success = application.bot.set_webhook(webhook_url)
-    if success:
-        return f"Webhook set to {webhook_url}!"
-    else:
-        return "Webhook setup failed."
+    # --- বট হ্যান্ডলার যোগ করা ---
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-# --- বট হ্যান্ডলার যোগ করা ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
+    # --- নতুন: বিল্ট-ইন সার্ভারে Health Check রুটটি যোগ করা ---
+    # এটি অবশ্যই run_webhook-এর *আগে* করতে হবে
+    application.add_routes([web.get('/', health_check)])
 
-# --- এই কোডটি Gunicorn রান করবে, তাই main() ফাংশনের দরকার নেই ---
+    # --- Webhook চালু করা ---
+    logger.info(f"Starting bot... setting webhook to {RENDER_URL}/webhook")
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="", # Webhook এখন মূল URL-এ সেট হবে
+        webhook_url=f"{RENDER_URL}"
+    )
+    logger.info(f"Webhook bot started successfully!")
+
+if __name__ == "__main__":
+    main()
