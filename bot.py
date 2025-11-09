@@ -119,23 +119,45 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
     # --- 3. Build a separate aiohttp web app and add the health-check route ---
-    # The telegram Application doesn't always expose a `web_app` attribute
-    # depending on the library version, so create our own and pass it to
-    # `run_webhook` below.
+    # Different python-telegram-bot versions expose different webhook
+    # integrations. We'll try the most capable option (passing our
+    # aiohttp `web_app` to `run_webhook`) and gracefully fall back to the
+    # plain `run_webhook(...)` call if that parameter isn't supported.
     web_app = web.Application()
     web_app.add_routes([web.get('/', health_check)])
 
     # --- 4. Start the webhook server and attach our aiohttp app ---
     logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
-    # Use `web_app=` so the aiohttp server used by python-telegram-bot
-    # serves our health-check route as well.
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="", # keep the webhook path as configured (can be changed to '/<token>' if needed)
-        webhook_url=f"{RENDER_URL}",
-        web_app=web_app
-    )
+    try:
+        # Try the newer/expected signature that accepts `web_app`.
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="", # keep the webhook path as configured (can be changed to '/<token>' if needed)
+            webhook_url=f"{RENDER_URL}",
+            web_app=web_app
+        )
+    except TypeError:
+        # Older or different PTB versions may not accept `web_app`.
+        # Fall back to calling run_webhook without it. This avoids the
+        # crash you saw in Render logs. If the library exposes
+        # `application.web_app`, attach our route there instead.
+        logger.warning("run_webhook() does not accept `web_app`. Falling back to run_webhook(...) without passing `web_app`.\n"
+                       "If you need the health-check endpoint on the same port, consider updating python-telegram-bot or configuring a webhook path and external health check.")
+        # If application has an internal web_app, try to attach the route.
+        try:
+            if hasattr(application, 'web_app') and application.web_app is not None:
+                application.web_app.add_routes([web.get('/', health_check)])
+        except Exception:
+            # best-effort: ignore failures here, we'll still start the webhook
+            pass
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="", # keep the webhook path as configured
+            webhook_url=f"{RENDER_URL}"
+        )
     logger.info(f"Webhook bot started successfully!")
 
 if __name__ == "__main__":
