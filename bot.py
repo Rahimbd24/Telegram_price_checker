@@ -1,16 +1,14 @@
 import requests
 import logging
-import os # <-- নতুন: Environment Variable পড়ার জন্য
-from flask import Flask, request # <-- নতুন: ওয়েব সার্ভারের জন্য
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- Bot Token (Render থেকে লোড হবে) ---
+# --- Config (Render থেকে স্বয়ংক্রিয়ভাবে লোড হবে) ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-
-# --- CoinGecko API Endpoints ---
-COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
-COINGECKO_SEARCH_URL = "https://api.coingecko.com/api/v3/search"
+# Render এই দুটি ভেরিয়েবল নিজে থেকেই সেট করে দেয়
+PORT = int(os.environ.get('PORT', 8443))
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -18,10 +16,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# --- Telegram Bot Application ---
-# আমরা application-কে এখানে তৈরি করছি
-application = Application.builder().token(BOT_TOKEN).build()
 
 
 # --- /start Command Handler ---
@@ -33,7 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "symbol, and I will get the real-time USD price for you."
     )
 
-# --- Main Price Checker Function ---
+# --- Main Price Checker Function (আগের মতোই) ---
 async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.lower().strip()
 
@@ -86,17 +80,27 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Price API Error: {e}")
         await update.message.reply_text("Error fetching data from the Price API.")
 
-# --- Flask Web Server Setup ---
-app = Flask(__name__)
 
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Handles incoming updates from Telegram."""
-    update_json = request.get_json(force=True)
-    update = Update.de_json(update_json, application.bot)
-    await application.update_queue.put(update)
-    return 'ok' # Telegram-কে জানাতে হবে যে মেসেজ পেয়েছি
+# --- বট চালু করার মূল ফাংশন ---
+def main():
+    """বটটি Webhook মোডে চালু করবে"""
+    application = Application.builder().token(BOT_TOKEN).build()
 
-# --- Bot Handlers (আগের মতোই) ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
+    # --- হ্যান্ডলার যোগ করা ---
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
+
+    # --- Webhook চালু করা ---
+    # এটি Render-এর URL এবং Port ব্যবহার করে নিজে থেকেই Webhook সেট করবে
+    logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="webhook", # আপনি URL-এর শেষে এটি দেখতে পাবেন
+        webhook_url=f"{RENDER_URL}/webhook" # টেলিগ্রামকে এই URL-টি দেওয়া হবে
+    )
+    logger.info(f"Webhook bot started successfully!")
+
+
+if __name__ == "__main__":
+    main()
