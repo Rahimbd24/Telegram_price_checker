@@ -1,2 +1,3 @@
-python-telegram-bot[webhook]
+python-telegram-bot
 requests
+aiohttp
