@@ -4,7 +4,7 @@ import os
 import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from aiohttp import web  # <-- নতুন: বিল্ট-ইন ওয়েব সার্ভারে রুট যোগ করার জন্য
+from aiohttp import web  # This is correct
 
 # --- Config ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -94,26 +94,35 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += message_note
     await update.message.reply_text(message, parse_mode='Markdown')
 
-# --- নতুন: UptimeRobot-এর জন্য "Health Check" রুট ---
+# --- UptimeRobot-এর জন্য "Health Check" রুট ---
 async def health_check(request: web.Request):
-    """UptimeRobot কে জানানোর জন্য যে বটটি বেঁচে আছে।"""
+    """UYptimeRobot কে জানানোর জন্য যে বটটি বেঁচে আছে।"""
     return web.Response(text="OK, Bot is alive!", status=200)
 
-# --- বট চালু করার মূল ফাংশন ---
+# --- বট চালু করার মূল ফাংশন (সংশোধিত) ---
 def main():
     """বটটি Webhook মোডে চালু করবে"""
-    application = Application.builder().token(BOT_TOKEN).build()
 
-    # --- বট হ্যান্ডলার যোগ করা ---
+    # --- 1. প্রথমে aiohttp web app তৈরি করা ---
+    web_app = web.Application()
+
+    # --- 2. Health check রুটটি web app-এ যোগ করা ---
+    web_app.add_routes([web.get('/', health_check)])
+
+    # --- 3. Telegram Application build করা এবং web_app টি পাস করা ---
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .web_app(web_app)  # <-- এটিই হলো সঠিক পদ্ধতি
+        .build()
+    )
+
+    # --- 4. বট হ্যান্ডলার যোগ করা ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # --- নতুন: বিল্ট-ইন সার্ভারে Health Check রুটটি যোগ করা ---
-    # এটি অবশ্যই run_webhook-এর *আগে* করতে হবে
-    application.add_routes([web.get('/', health_check)])
-
-    # --- Webhook চালু করা ---
-    logger.info(f"Starting bot... setting webhook to {RENDER_URL}/webhook")
+    # --- 5. Webhook চালু করা ---
+    logger.info(f"Starting bot... setting webhook to {RENDER_URL}")
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -121,6 +130,7 @@ def main():
         webhook_url=f"{RENDER_URL}"
     )
     logger.info(f"Webhook bot started successfully!")
+
 
 if __name__ == "__main__":
     main()
