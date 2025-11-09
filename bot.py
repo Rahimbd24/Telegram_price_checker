@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import logging
 import os
 import sys
@@ -11,7 +12,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 8443))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-# Validate environment variables early
 if not BOT_TOKEN:
     print("❌ ERROR: BOT_TOKEN not set in environment variables.")
     sys.exit(1)
@@ -20,7 +20,7 @@ if not RENDER_URL:
     print("❌ ERROR: RENDER_EXTERNAL_URL not set. Example: https://your-app.onrender.com")
     sys.exit(1)
 
-RENDER_URL = RENDER_URL.rstrip("/")  # remove trailing slash
+RENDER_URL = RENDER_URL.rstrip("/")
 
 # ==================== API ENDPOINTS ====================
 COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
@@ -34,12 +34,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== HANDLERS ====================
+# ==================== COMMAND HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.first_name if update.effective_user else "there"
     await update.message.reply_text(
         f"👋 Hi {user}!\n\nSend me a cryptocurrency name or symbol and I’ll return the current USD price."
     )
+
 
 async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip().lower()
@@ -107,53 +108,50 @@ async def get_crypto_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(msg, parse_mode="HTML")
 
-# ==================== HEALTH CHECK ====================
-async def health_check(request):
+
+# ==================== HEALTH CHECK SERVER ====================
+async def handle_health(request):
     return web.Response(text="✅ Bot is running fine!", status=200)
 
-# ==================== MAIN APP ====================
+
+# ==================== MAIN FUNCTION ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_crypto_price))
 
-    # Add health-check route safely if supported
-    try:
-        if hasattr(app, "web_app"):
-            app.web_app.add_routes([web.get("/", health_check)])
-            logger.info("Health check route added successfully.")
-        else:
-            logger.warning("No web_app attribute — skipping health route.")
-    except Exception as e:
-        logger.warning(f"Could not add health route: {e}")
-
-    # Build webhook URL and path
-    url_path = BOT_TOKEN  # acts as secret endpoint path
+    # Build webhook URL
+    url_path = BOT_TOKEN  # secret endpoint
     webhook_url = f"{RENDER_URL}/{url_path}"
-    logger.info(f"Attempting to start webhook on: {webhook_url}")
 
-    # Try to run webhook; fallback to polling if webhook extras aren't installed
-    try:
-        app.run_webhook(
+    async def run():
+        # Health-check web server
+        web_app = web.Application()
+        web_app.router.add_get("/", handle_health)
+
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+
+        # Start Telegram webhook
+        await app.initialize()
+        await app.start()
+        await app.updater.start_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=url_path,
             webhook_url=webhook_url,
         )
-        logger.info("Webhook started successfully (run_webhook returned).")
-    except RuntimeError as rte:
-        # This is the error you saw when 'webhooks' extras are not installed
-        logger.error("RuntimeError while starting webhook: %s", rte)
-        logger.error(
-            "If you want webhook support, install with: pip install 'python-telegram-bot[webhooks]'\n"
-            "Falling back to polling to keep the bot running."
-        )
-        try:
-            app.run_polling()
-        except Exception as e:
-            logger.critical("Polling also failed: %s", e)
-            raise
+
+        logger.info(f"✅ Webhook started at {webhook_url}")
+        logger.info(f"🌐 Health check available at {RENDER_URL}/")
+
+        await app.updater.idle()
+
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
     main()
